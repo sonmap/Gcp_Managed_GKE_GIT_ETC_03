@@ -1,0 +1,7 @@
+{
+  "taskId": "task-001",
+  "taskName": "analysis-demo-001",
+  "group": "a",
+  "targetProjectId": "CHANGE-ME",
+  "location": "asia-northeast3"
+}

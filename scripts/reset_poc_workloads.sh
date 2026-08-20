@@ -24,6 +24,14 @@ if [[ "${CONFIRM_DELETE:-}" != "YES" ]]; then
   exit 2
 fi
 
+if gcloud container clusters describe "${CLUSTER_NAME}" \
+    --project="${PROJECT_ID}" \
+    --location="${REGION}" >/dev/null 2>&1; then
+  CLUSTER_EXISTS="YES"
+else
+  CLUSTER_EXISTS="NO"
+fi
+
 echo "=== 1. Delete task Infrastructure Manager deployments ==="
 mapfile -t deployments < <(
   gcloud infra-manager deployments list \
@@ -35,20 +43,34 @@ mapfile -t deployments < <(
 for deployment in "${deployments[@]:-}"; do
   [[ -z "${deployment}" ]] && continue
   deployment_id="${deployment##*/}"
-  if [[ "${deployment_id}" == task-* ]]; then
-    echo "Deleting ${deployment_id} and managed resources..."
+  [[ "${deployment_id}" != task-* ]] && continue
+
+  if [[ "${CLUSTER_EXISTS}" == "YES" ]]; then
+    echo "Deleting ${deployment_id} and Terraform-managed resources..."
+    if ! gcloud infra-manager deployments delete "${deployment_id}" \
+        --project="${PROJECT_ID}" \
+        --location="${REGION}" \
+        --delete-policy=delete \
+        --quiet; then
+      echo "Destroy failed for ${deployment_id}; abandoning deployment metadata so cleanup can continue."
+      gcloud infra-manager deployments delete "${deployment_id}" \
+        --project="${PROJECT_ID}" \
+        --location="${REGION}" \
+        --delete-policy=abandon \
+        --quiet || true
+    fi
+  else
+    echo "GKE cluster is already absent; abandoning ${deployment_id} deployment metadata."
     gcloud infra-manager deployments delete "${deployment_id}" \
       --project="${PROJECT_ID}" \
       --location="${REGION}" \
-      --delete-policy=delete \
+      --delete-policy=abandon \
       --quiet || true
   fi
 done
 
 echo "=== 2. Delete GKE cluster created manually in the old PoC ==="
-if gcloud container clusters describe "${CLUSTER_NAME}" \
-    --project="${PROJECT_ID}" \
-    --location="${REGION}" >/dev/null 2>&1; then
+if [[ "${CLUSTER_EXISTS}" == "YES" ]]; then
   gcloud container clusters delete "${CLUSTER_NAME}" \
     --project="${PROJECT_ID}" \
     --location="${REGION}" \
@@ -70,4 +92,4 @@ done < <(
 
 echo "=== Reset complete ==="
 echo "Preserved VM/network/control-plane resources."
-echo "Next: terraform -chdir=infra-manager/terraform/foundation init && terraform -chdir=infra-manager/terraform/foundation apply"
+echo "Next: terraform -chdir=infra-manager/terraform/foundation init && terraform -chdir=infra-manager/terraform/foundation plan"

@@ -1,6 +1,6 @@
 locals {
-  task_label  = substr(regexreplace(lower(var.task_id), "[^a-z0-9_-]", "_"), 0, 63)
-  group_label = substr(regexreplace(lower(var.group), "[^a-z0-9_-]", "_"), 0, 63)
+  task_label  = substr(replace(lower(var.task_id), "/[^a-z0-9_-]/", "_"), 0, 63)
+  group_label = substr(replace(lower(var.group), "/[^a-z0-9_-]/", "_"), 0, 63)
 }
 
 resource "google_bigquery_dataset" "task" {

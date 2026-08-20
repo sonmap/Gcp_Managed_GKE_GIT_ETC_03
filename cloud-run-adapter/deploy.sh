@@ -12,9 +12,10 @@ IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/cloud-run-adapter:lat
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "[1/3] Build adapter container with Cloud Build"
+echo "[1/3] Build adapter container with regional Cloud Build"
 gcloud builds submit "${SCRIPT_DIR}" \
   --project="${PROJECT_ID}" \
+  --region="${REGION}" \
   --tag="${IMAGE}"
 
 echo "[2/3] Deploy adapter to Cloud Run"

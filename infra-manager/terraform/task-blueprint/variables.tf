@@ -28,3 +28,21 @@ variable "bq_location" {
   type        = string
   default     = "asia-northeast3"
 }
+
+variable "gke_project_id" {
+  description = "GCP project that owns the GKE cluster; empty means target_project_id"
+  type        = string
+  default     = ""
+}
+
+variable "gke_cluster_name" {
+  description = "Existing GKE Autopilot cluster used by analysis tasks"
+  type        = string
+  default     = "analysis-autopilot-a"
+}
+
+variable "gke_location" {
+  description = "Region or zone of the GKE cluster"
+  type        = string
+  default     = "asia-northeast3"
+}

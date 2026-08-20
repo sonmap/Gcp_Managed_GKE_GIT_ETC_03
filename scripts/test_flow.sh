@@ -18,7 +18,7 @@ EOF
 )
 
 echo "== Health =="
-curl -fsS "${ADAPTER_URL}/healthz" | python3 -m json.tool
+curl -fsS "${ADAPTER_URL}/health" | python3 -m json.tool
 
 echo "== Deploy =="
 RESPONSE="$(curl -fsS -X POST "${ADAPTER_URL}/deploy" \

@@ -68,12 +68,8 @@ gcloud artifacts repositories describe "${REPO_NAME}" \
     --repository-format=docker \
     --description="PoC images for VM-less analysis platform"
 
-echo "== Grant current Cloud Build default SA image push/log permissions =="
-BUILD_SA="$(gcloud builds get-default-service-account --project="${PROJECT_ID}" --format='value(serviceAccountEmail)' 2>/dev/null || true)"
-if [[ -z "${BUILD_SA}" ]]; then
-  # Some gcloud versions print the email directly without a field wrapper.
-  BUILD_SA="$(gcloud builds get-default-service-account --project="${PROJECT_ID}" 2>/dev/null | tail -1 | tr -d '[:space:]' || true)"
-fi
+echo "== Grant current regional Cloud Build default SA image push/log permissions =="
+BUILD_SA="$(gcloud builds get-default-service-account --project="${PROJECT_ID}" --region="${REGION}" 2>/dev/null | tail -1 | tr -d '[:space:]' || true)"
 if [[ -n "${BUILD_SA}" && "${BUILD_SA}" == *"@"* ]]; then
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${BUILD_SA}" \
@@ -85,7 +81,7 @@ if [[ -n "${BUILD_SA}" && "${BUILD_SA}" == *"@"* ]]; then
     --quiet >/dev/null
 else
   echo "WARNING: Could not resolve the Cloud Build default service account."
-  echo "If image build fails, run: gcloud builds get-default-service-account --project=${PROJECT_ID}"
+  echo "Check with: gcloud builds get-default-service-account --project=${PROJECT_ID} --region=${REGION}"
 fi
 
 cat <<EOF

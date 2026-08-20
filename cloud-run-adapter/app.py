@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import uuid
 from typing import Any, Dict
 
@@ -18,10 +19,23 @@ TF_REPO_URL = os.getenv(
     "https://github.com/sonmap/Gcp_Managed_GKE_GIT_ETC_03.git",
 )
 TF_REPO_REF = os.getenv("TF_REPO_REF", "main")
-TF_DIRECTORY = os.getenv(
+TASK_TF_DIRECTORY = os.getenv(
     "TF_DIRECTORY", "infra-manager/terraform/task-blueprint"
 )
+FOUNDATION_TF_DIRECTORY = os.getenv(
+    "FOUNDATION_TF_DIRECTORY", "infra-manager/terraform/foundation"
+)
+FOUNDATION_DEPLOYMENT_ID = os.getenv("FOUNDATION_DEPLOYMENT_ID", "foundation-analysis")
 DEFAULT_TARGET_PROJECT_ID = os.getenv("DEFAULT_TARGET_PROJECT_ID", "")
+
+GKE_PROJECT_ID = os.getenv("GKE_PROJECT_ID", IM_PROJECT_ID)
+GKE_LOCATION = os.getenv("GKE_LOCATION", IM_LOCATION)
+GKE_CLUSTER_NAME = os.getenv("GKE_CLUSTER_NAME", "analysis-autopilot-a")
+GKE_NETWORK_NAME = os.getenv("GKE_NETWORK_NAME", "managed02-dev-vpc")
+GKE_SUBNETWORK_NAME = os.getenv("GKE_SUBNETWORK_NAME", "managed02-dev-subnet")
+GKE_RELEASE_CHANNEL = os.getenv("GKE_RELEASE_CHANNEL", "REGULAR")
+FOUNDATION_WAIT_SECONDS = int(os.getenv("FOUNDATION_WAIT_SECONDS", "780"))
+FOUNDATION_POLL_SECONDS = int(os.getenv("FOUNDATION_POLL_SECONDS", "10"))
 
 credentials, _ = google.auth.default(
     scopes=["https://www.googleapis.com/auth/cloud-platform"]
@@ -49,7 +63,6 @@ def _safe_id(value: str, prefix: str = "task") -> str:
 
 
 def _dataset_id(task_id: str) -> str:
-    # BigQuery dataset IDs use letters/numbers/underscore.
     raw = re.sub(r"[^A-Za-z0-9_]", "_", task_id)
     raw = re.sub(r"_+", "_", raw).strip("_")
     if not raw:
@@ -57,14 +70,20 @@ def _dataset_id(task_id: str) -> str:
     return f"ds_{raw}"[:1024]
 
 
-def _map_legacy_json(payload: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Adapter boundary.
+def _parent() -> str:
+    return f"projects/{IM_PROJECT_ID}/locations/{IM_LOCATION}"
 
-    The Java portal JSON is not changed. Only this Cloud Run service knows how
-    legacy request fields map to Terraform variables. Add aliases here when the
-    real production JSON schema is known.
-    """
+
+def _deployment_name(deployment_id: str) -> str:
+    return f"{_parent()}/deployments/{deployment_id}"
+
+
+def _deployment_url(deployment_id: str) -> str:
+    return f"{API_ROOT}/{_deployment_name(deployment_id)}"
+
+
+def _map_legacy_json(payload: Dict[str, Any]) -> Dict[str, str]:
+    """Map the unchanged legacy Java JSON contract to Terraform variables."""
     task_id = str(
         _first(payload, "taskId", "task_id", "projectId", "project_id", "requestId")
         or ""
@@ -89,8 +108,10 @@ def _map_legacy_json(payload: Dict[str, Any]) -> Dict[str, str]:
         )
 
     group = str(_first(payload, "group", "groupCode", "group_code", default="a"))
-    location = str(_first(payload, "location", "region", default="asia-northeast3"))
-    task_name = str(_first(payload, "taskName", "task_name", "projectName", default=task_id))
+    location = str(_first(payload, "location", "region", default=IM_LOCATION))
+    task_name = str(
+        _first(payload, "taskName", "task_name", "projectName", default=task_id)
+    )
 
     return {
         "task_id": task_id,
@@ -99,34 +120,201 @@ def _map_legacy_json(payload: Dict[str, Any]) -> Dict[str, str]:
         "target_project_id": target_project_id,
         "dataset_id": _dataset_id(task_id),
         "bq_location": location,
+        "gke_project_id": GKE_PROJECT_ID,
+        "gke_cluster_name": GKE_CLUSTER_NAME,
+        "gke_location": GKE_LOCATION,
     }
 
 
-def _deployment_body(mapped: Dict[str, str], deployment_name: str | None = None):
-    input_values = {key: {"inputValue": value} for key, value in mapped.items()}
+def _foundation_inputs() -> Dict[str, str]:
+    return {
+        "project_id": GKE_PROJECT_ID,
+        "region": GKE_LOCATION,
+        "network_name": GKE_NETWORK_NAME,
+        "subnetwork_name": GKE_SUBNETWORK_NAME,
+        "cluster_name": GKE_CLUSTER_NAME,
+        "release_channel": GKE_RELEASE_CHANNEL,
+    }
 
+
+def _blueprint_body(
+    directory: str,
+    inputs: Dict[str, str],
+    annotations: Dict[str, str],
+    deployment_name: str | None = None,
+):
     body = {
         "serviceAccount": IM_SERVICE_ACCOUNT,
         "terraformBlueprint": {
             "gitSource": {
                 "repo": TF_REPO_URL,
-                "directory": TF_DIRECTORY,
+                "directory": directory,
                 "ref": TF_REPO_REF,
             },
-            "inputValues": input_values,
+            "inputValues": {
+                key: {"inputValue": str(value)} for key, value in inputs.items()
+            },
         },
-        "annotations": {
-            "source": "datalake-portal-cloud-run-adapter",
-            "task-id": _safe_id(mapped["task_id"]),
-            "group": _safe_id(mapped["group"], "group")[:20],
-        },
+        "annotations": annotations,
     }
     if deployment_name:
         body["name"] = deployment_name
     return body
 
 
-# Cloud Run reserves some URL paths that end in 'z'. Use /health instead of /healthz.
+def _json_or_text(response):
+    try:
+        return response.json()
+    except Exception:
+        return {"raw": response.text}
+
+
+def _create_deployment(
+    deployment_id: str,
+    directory: str,
+    inputs: Dict[str, str],
+    annotations: Dict[str, str],
+):
+    response = authed.post(
+        f"{API_ROOT}/{_parent()}/deployments",
+        params={"deploymentId": deployment_id, "requestId": str(uuid.uuid4())},
+        json=_blueprint_body(directory, inputs, annotations),
+        timeout=60,
+    )
+    return response, _json_or_text(response)
+
+
+def _update_deployment(
+    deployment_id: str,
+    directory: str,
+    inputs: Dict[str, str],
+    annotations: Dict[str, str],
+):
+    name = _deployment_name(deployment_id)
+    response = authed.patch(
+        _deployment_url(deployment_id),
+        params={
+            "updateMask": "terraformBlueprint,serviceAccount,annotations",
+            "requestId": str(uuid.uuid4()),
+        },
+        json=_blueprint_body(directory, inputs, annotations, name),
+        timeout=60,
+    )
+    return response, _json_or_text(response)
+
+
+def _ensure_foundation() -> Dict[str, Any]:
+    """
+    Ensure the shared GKE Autopilot foundation exists through Infrastructure Manager.
+
+    The first portal request creates foundation-analysis from the foundation Terraform
+    directory and waits until that deployment becomes ACTIVE. No terraform CLI and no
+    gcloud container clusters create-auto command are used.
+    """
+    existing = authed.get(_deployment_url(FOUNDATION_DEPLOYMENT_ID), timeout=30)
+
+    if existing.status_code == 404:
+        response, result = _create_deployment(
+            FOUNDATION_DEPLOYMENT_ID,
+            FOUNDATION_TF_DIRECTORY,
+            _foundation_inputs(),
+            {
+                "source": "datalake-portal-cloud-run-adapter",
+                "layer": "foundation",
+            },
+        )
+        if not response.ok:
+            raise RuntimeError(
+                f"failed to create foundation deployment: {response.status_code} {result}"
+            )
+    elif not existing.ok:
+        raise RuntimeError(
+            f"failed to inspect foundation deployment: {existing.status_code} {existing.text}"
+        )
+    else:
+        current = existing.json()
+        state = current.get("state", "")
+        if state == "ACTIVE":
+            return current
+        if state == "FAILED":
+            response, result = _update_deployment(
+                FOUNDATION_DEPLOYMENT_ID,
+                FOUNDATION_TF_DIRECTORY,
+                _foundation_inputs(),
+                {
+                    "source": "datalake-portal-cloud-run-adapter",
+                    "layer": "foundation",
+                },
+            )
+            if not response.ok:
+                raise RuntimeError(
+                    f"failed to retry foundation deployment: {response.status_code} {result}"
+                )
+        elif state == "DELETING":
+            raise RuntimeError("foundation deployment is currently deleting")
+
+    deadline = time.monotonic() + FOUNDATION_WAIT_SECONDS
+    last_state = "CREATING"
+
+    while time.monotonic() < deadline:
+        time.sleep(FOUNDATION_POLL_SECONDS)
+        response = authed.get(_deployment_url(FOUNDATION_DEPLOYMENT_ID), timeout=30)
+        if not response.ok:
+            raise RuntimeError(
+                f"failed while waiting for foundation: {response.status_code} {response.text}"
+            )
+
+        current = response.json()
+        last_state = current.get("state", "UNKNOWN")
+        if last_state == "ACTIVE":
+            return current
+        if last_state == "FAILED":
+            detail = current.get("stateDetail", "foundation Terraform failed")
+            raise RuntimeError(f"foundation deployment failed: {detail}")
+
+    raise RuntimeError(
+        f"foundation deployment did not become ACTIVE within {FOUNDATION_WAIT_SECONDS}s; last state={last_state}"
+    )
+
+
+def _upsert_task(mapped: Dict[str, str]):
+    deployment_id = _safe_id(mapped["task_id"])
+    annotations = {
+        "source": "datalake-portal-cloud-run-adapter",
+        "layer": "task",
+        "task-id": deployment_id,
+        "group": _safe_id(mapped["group"], "group")[:20],
+    }
+
+    existing = authed.get(_deployment_url(deployment_id), timeout=30)
+
+    if existing.status_code == 404:
+        response, result = _create_deployment(
+            deployment_id, TASK_TF_DIRECTORY, mapped, annotations
+        )
+        action = "create"
+    elif existing.ok:
+        current = existing.json()
+        if current.get("state") in {"CREATING", "UPDATING", "DELETING"}:
+            return None, {
+                "error": "task deployment is busy",
+                "deployment": _deployment_name(deployment_id),
+                "state": current.get("state"),
+            }, "busy"
+        response, result = _update_deployment(
+            deployment_id, TASK_TF_DIRECTORY, mapped, annotations
+        )
+        action = "update"
+    else:
+        return None, {
+            "error": "failed to inspect task deployment",
+            "status": existing.status_code,
+            "detail": existing.text,
+        }, "inspect-error"
+
+    return response, result, action
+
+
 @app.get("/health")
 def health():
     return jsonify({"status": "ok"})
@@ -143,62 +331,32 @@ def deploy():
     except ValueError as exc:
         return jsonify({"error": str(exc), "received": payload}), 400
 
-    deployment_id = _safe_id(mapped["task_id"])
-    parent = f"projects/{IM_PROJECT_ID}/locations/{IM_LOCATION}"
-    deployment_name = f"{parent}/deployments/{deployment_id}"
-    deployment_url = f"{API_ROOT}/{deployment_name}"
-
-    existing = authed.get(deployment_url, timeout=30)
-    request_id = str(uuid.uuid4())
-
-    if existing.status_code == 404:
-        url = f"{API_ROOT}/{parent}/deployments"
-        response = authed.post(
-            url,
-            params={"deploymentId": deployment_id, "requestId": request_id},
-            json=_deployment_body(mapped),
-            timeout=60,
-        )
-        action = "create"
-    elif existing.ok:
-        current = existing.json()
-        if current.get("state") in {"CREATING", "UPDATING", "DELETING"}:
-            return jsonify(
-                {
-                    "error": "deployment is busy",
-                    "deployment": deployment_name,
-                    "state": current.get("state"),
-                }
-            ), 409
-
-        response = authed.patch(
-            deployment_url,
-            params={
-                "updateMask": "terraformBlueprint,serviceAccount,annotations",
-                "requestId": request_id,
-            },
-            json=_deployment_body(mapped, deployment_name),
-            timeout=60,
-        )
-        action = "update"
-    else:
+    # Phase 1: Infrastructure Manager creates/validates the shared GKE foundation.
+    try:
+        foundation = _ensure_foundation()
+    except RuntimeError as exc:
         return jsonify(
             {
-                "error": "failed to inspect Infrastructure Manager deployment",
-                "status": existing.status_code,
-                "detail": existing.text,
+                "error": str(exc),
+                "phase": "foundation",
+                "foundationDeployment": _deployment_name(FOUNDATION_DEPLOYMENT_ID),
+                "mappedVariables": mapped,
             }
         ), 502
 
-    try:
-        result = response.json()
-    except Exception:
-        result = {"raw": response.text}
+    # Phase 2: after the GKE foundation is ACTIVE, submit the task blueprint.
+    response, result, action = _upsert_task(mapped)
+    if response is None:
+        status_code = 409 if action == "busy" else 502
+        result["phase"] = "task"
+        result["mappedVariables"] = mapped
+        return jsonify(result), status_code
 
     if not response.ok:
         return jsonify(
             {
-                "error": "Infrastructure Manager API request failed",
+                "error": "Infrastructure Manager task request failed",
+                "phase": "task",
                 "action": action,
                 "status": response.status_code,
                 "detail": result,
@@ -209,7 +367,13 @@ def deploy():
     return jsonify(
         {
             "action": action,
-            "deployment": deployment_name,
+            "phase": "task",
+            "foundation": {
+                "deployment": _deployment_name(FOUNDATION_DEPLOYMENT_ID),
+                "state": foundation.get("state", "ACTIVE"),
+                "cluster": GKE_CLUSTER_NAME,
+            },
+            "deployment": _deployment_name(_safe_id(mapped["task_id"])),
             "operation": result.get("name"),
             "mappedVariables": mapped,
             "infrastructureManagerResponse": result,
@@ -228,11 +392,7 @@ def status():
         return jsonify({"error": "invalid Infrastructure Manager operation name"}), 400
 
     response = authed.get(f"{API_ROOT}/{operation}", timeout=30)
-    try:
-        body = response.json()
-    except Exception:
-        body = {"raw": response.text}
-    return jsonify(body), response.status_code
+    return jsonify(_json_or_text(response)), response.status_code
 
 
 if __name__ == "__main__":

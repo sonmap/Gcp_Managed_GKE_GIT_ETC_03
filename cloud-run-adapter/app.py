@@ -103,10 +103,7 @@ def _map_legacy_json(payload: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _deployment_body(mapped: Dict[str, str], deployment_name: str | None = None):
-    input_values = {
-        key: {"inputValue": value}
-        for key, value in mapped.items()
-    }
+    input_values = {key: {"inputValue": value} for key, value in mapped.items()}
 
     body = {
         "serviceAccount": IM_SERVICE_ACCOUNT,
@@ -129,8 +126,9 @@ def _deployment_body(mapped: Dict[str, str], deployment_name: str | None = None)
     return body
 
 
-@app.get("/healthz")
-def healthz():
+# Cloud Run reserves some URL paths that end in 'z'. Use /health instead of /healthz.
+@app.get("/health")
+def health():
     return jsonify({"status": "ok"})
 
 

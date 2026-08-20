@@ -1,0 +1,5 @@
+server:
+  port: 8080
+
+adapter:
+  url: ${CLOUD_RUN_ADAPTER_URL:http://127.0.0.1:9090}

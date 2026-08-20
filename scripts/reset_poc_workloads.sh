@@ -37,7 +37,9 @@ for deployment in "${deployments[@]:-}"; do
   deployment_id="${deployment##*/}"
   if [[ "${deployment_id}" == task-* ]]; then
     echo "Deleting ${deployment_id} and managed resources..."
-    gcloud infra-manager deployments delete "${deployment}" \
+    gcloud infra-manager deployments delete "${deployment_id}" \
+      --project="${PROJECT_ID}" \
+      --location="${REGION}" \
       --delete-policy=delete \
       --quiet || true
   fi

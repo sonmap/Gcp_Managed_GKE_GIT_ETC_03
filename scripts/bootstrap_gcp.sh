@@ -37,18 +37,21 @@ echo "== Cloud Run adapter -> Infrastructure Manager permissions =="
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${ADAPTER_SA}" \
   --role="roles/config.admin" \
+  --condition=None \
   --quiet >/dev/null
 
 gcloud iam service-accounts add-iam-policy-binding "${IM_EXEC_SA}" \
   --project="${PROJECT_ID}" \
   --member="serviceAccount:${ADAPTER_SA}" \
   --role="roles/iam.serviceAccountUser" \
+  --condition=None \
   --quiet >/dev/null
 
 echo "== Infrastructure Manager execution SA permissions =="
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${IM_EXEC_SA}" \
   --role="roles/config.agent" \
+  --condition=None \
   --quiet >/dev/null
 
 # PoC only: lets Terraform create/delete BigQuery datasets in the target project.
@@ -56,6 +59,7 @@ gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
 gcloud projects add-iam-policy-binding "${TARGET_PROJECT_ID}" \
   --member="serviceAccount:${IM_EXEC_SA}" \
   --role="roles/bigquery.admin" \
+  --condition=None \
   --quiet >/dev/null
 
 echo "== Artifact Registry repository =="
@@ -74,10 +78,12 @@ if [[ -n "${BUILD_SA}" && "${BUILD_SA}" == *"@"* ]]; then
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${BUILD_SA}" \
     --role="roles/artifactregistry.writer" \
+    --condition=None \
     --quiet >/dev/null
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${BUILD_SA}" \
     --role="roles/logging.logWriter" \
+    --condition=None \
     --quiet >/dev/null
 else
   echo "WARNING: Could not resolve the Cloud Build default service account."

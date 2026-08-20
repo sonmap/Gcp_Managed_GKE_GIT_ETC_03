@@ -12,6 +12,7 @@
     input { padding:10px; width:75%; box-sizing:border-box; }
     pre { background:#111827; color:#e5e7eb; padding:16px; border-radius:8px; overflow:auto; min-height:80px; white-space:pre-wrap; }
     .flow { font-weight:700; color:#244d91; }
+    .note { color:#6b7280; }
     .summary { display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-top:14px; }
     .metric { background:#f3f6fb; padding:14px; border-radius:8px; }
     .metric span { display:block; color:#6b7280; font-size:12px; margin-bottom:6px; }
@@ -25,14 +26,15 @@
 </head>
 <body>
   <h1>VM-less 분석과제 신청 PoC</h1>
-  <p class="flow">Java Portal → Cloud Run Adapter → Infrastructure Manager → Terraform → BigQuery Dataset</p>
+  <p class="flow">Java Portal → Cloud Run Adapter → Infrastructure Manager → Foundation Terraform(GKE Autopilot) → Task Terraform(BigQuery + Namespace + Quota)</p>
+  <p class="note">첫 과제 신청에서는 공용 GKE Autopilot이 없으면 먼저 자동 생성하므로 수 분이 걸릴 수 있습니다. 이후 과제부터는 기존 GKE를 재사용합니다.</p>
 
   <div class="card">
     <h2>과제 신청 JSON</h2>
     <p>기존 Java 요청 JSON은 변경하지 않고 Cloud Run 어댑터로 그대로 전달합니다.</p>
     <textarea id="payload">{
-  "taskId": "task-004",
-  "taskName": "analysis-task-004",
+  "taskId": "task-001",
+  "taskName": "analysis-task-001",
   "group": "a",
   "targetProjectId": "dev-com-334508",
   "location": "asia-northeast3"
@@ -76,17 +78,18 @@ function showDeployResult(obj) {
   const payload = payloadObject();
   const mapped = obj.mappedVariables || {};
   const operation = obj.operation || obj.name || '';
-  if (operation && operation.includes('/operations/')) document.getElementById('operation').value = operation;
+  if (operation) document.getElementById('operation').value = operation;
 
   setText('taskId', mapped.task_id || payload.taskId || payload.task_id || '-');
   setText('datasetId', mapped.dataset_id || '-');
 
   if (obj.error) {
     setText('resultStatus', '요청 실패', 'error');
-    setText('infraState', 'ERROR', 'error');
+    setText('infraState', obj.phase === 'foundation' ? 'FOUNDATION ERROR' : 'ERROR', 'error');
   } else {
     setText('resultStatus', '배포 요청 접수', 'running');
-    setText('infraState', 'RUNNING', 'running');
+    const foundationState = obj.foundation?.state;
+    setText('infraState', foundationState === 'ACTIVE' ? 'TASK RUNNING' : 'RUNNING', 'running');
   }
 }
 
@@ -118,7 +121,7 @@ function showStatusResult(obj) {
 
 async function deploy() {
   const result = document.getElementById('result');
-  setText('resultStatus', '요청 중...', 'running');
+  setText('resultStatus', '요청 중... 첫 요청은 GKE 생성으로 수 분 소요', 'running');
   try {
     const body = document.getElementById('payload').value;
     const r = await fetch('/api/tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body});

@@ -2,104 +2,139 @@
 
 PoC for migrating a legacy Java portal's direct Google Cloud REST provisioning to:
 
-`Java Portal -> Cloud Run Adapter -> Infrastructure Manager REST API -> Terraform -> Google Cloud resource`
+`Java Portal -> Cloud Run Adapter -> Infrastructure Manager REST API -> Terraform -> Google Cloud resources`
 
-## PoC flow
+## Current architecture
 
-1. User accesses the Java portal through Nginx on `192.168.142.101`.
-2. The portal submits the existing-style JSON request to the Cloud Run adapter.
-3. The adapter keeps the portal contract isolated from Google Cloud provisioning logic and maps JSON fields to Terraform input variables.
-4. The adapter calls Infrastructure Manager at `https://config.googleapis.com`.
-5. Infrastructure Manager reads the Terraform blueprint from this public GitHub repository and creates a test BigQuery dataset.
-6. The portal receives the Infrastructure Manager long-running operation name and can query its status.
+The PoC is split into two Terraform layers.
+
+```text
+1. Foundation Terraform (run once)
+   existing VPC/Subnet -> GKE Autopilot private cluster
+
+2. Task Terraform (run for every approved task)
+   BigQuery Dataset + GKE Namespace + ResourceQuota
+```
+
+The bastion VM and its VPC/subnet are intentionally outside Terraform state so they can be preserved during PoC resets.
 
 ## Repository layout
 
 ```text
-portal-java/                       Java sample portal for 192.168.142.101
-  deploy/                          Nginx and VM installation files
-cloud-run-adapter/                 Step 7 mapping adapter on Cloud Run
+portal-java/                       Java sample portal
+cloud-run-adapter/                 Legacy JSON -> Terraform input adapter
 infra-manager/terraform/
-  task-blueprint/                  Terraform root module run by Infra Manager
-scripts/                           GCP bootstrap/deploy helper scripts
+  foundation/                      Terraform-only GKE Autopilot creation
+  task-blueprint/                  Per-task BigQuery + Namespace + ResourceQuota
+scripts/
+  bootstrap_gcp.sh                 Initial API/IAM bootstrap
+  reset_poc_workloads.sh           Reset PoC resources but preserve VM/control plane
+  test_flow.sh                     Adapter/portal test helper
 examples/                          Sample legacy JSON request
 ```
 
-## Important design point
+## Foundation: create GKE with Terraform only
 
-The Java portal does **not** call individual GCP resource APIs. It only calls the Cloud Run adapter. The adapter calls the Infrastructure Manager API, and Infrastructure Manager executes the Terraform blueprint. This keeps Terraform state/revisions in Infrastructure Manager and removes resource-specific GCP API calls from the portal.
+`infra-manager/terraform/foundation` creates `analysis-autopilot-a` without running `gcloud container clusters create-auto`.
 
-## Quick test sequence
+It uses the existing PoC network:
 
-### 1. Bootstrap GCP
+- Project: `dev-com-334508`
+- Region: `asia-northeast3`
+- VPC: `managed02-dev-vpc`
+- Subnet: `managed02-dev-subnet`
+- Cluster: `analysis-autopilot-a`
+- Autopilot: enabled
+- Private nodes: enabled, so nodes do not require external IP addresses
+- Pod/Service ranges: GKE-managed secondary ranges
 
-```bash
-export PROJECT_ID=<infra-manager-project-id>
-export TARGET_PROJECT_ID=<project-that-will-own-test-dataset>
-export REGION=asia-northeast3
-bash scripts/bootstrap_gcp.sh
-```
-
-### 2. Deploy the Cloud Run adapter
-
-```bash
-export PROJECT_ID=<infra-manager-project-id>
-export TARGET_PROJECT_ID=<project-that-will-own-test-dataset>
-export REGION=asia-northeast3
-bash cloud-run-adapter/deploy.sh
-```
-
-Copy the Cloud Run URL printed by the script.
-
-### 3. Install the Java portal on 192.168.142.101
-
-Run on that VM:
+Apply:
 
 ```bash
-git clone https://github.com/sonmap/Gcp_Managed_GKE_GIT_ETC_03.git
-cd Gcp_Managed_GKE_GIT_ETC_03
-sudo CLOUD_RUN_ADAPTER_URL=https://<cloud-run-url> bash portal-java/deploy/install_vm.sh
+terraform -chdir=infra-manager/terraform/foundation init
+terraform -chdir=infra-manager/terraform/foundation plan
+terraform -chdir=infra-manager/terraform/foundation apply
 ```
 
-Then browse to:
+Destroy only the foundation resources managed by this Terraform state:
 
-```text
-http://192.168.142.101/
+```bash
+terraform -chdir=infra-manager/terraform/foundation destroy
 ```
 
-### 4. Submit a request
+The bastion VM, VPC, and subnet are not destroyed because the foundation module reads those network resources as data sources.
 
-The sample portal posts JSON to `/api/tasks`. The Java backend forwards the request body to Cloud Run without changing the JSON schema.
+## Task provisioning flow
 
-Example:
+1. User accesses the Java portal through Nginx.
+2. The portal submits the existing-style JSON request to the Cloud Run adapter.
+3. The adapter forwards the legacy contract unchanged and maps fields to Terraform variables.
+4. The adapter calls Infrastructure Manager at `https://config.googleapis.com`.
+5. Infrastructure Manager reads `infra-manager/terraform/task-blueprint` from GitHub.
+6. Terraform creates the task BigQuery dataset, Kubernetes namespace, and ResourceQuota.
+
+Example request:
 
 ```json
 {
-  "taskId": "task-001",
-  "taskName": "analysis-demo-001",
+  "taskId": "task-005",
+  "taskName": "analysis-task-005",
   "group": "a",
-  "targetProjectId": "my-target-project",
+  "targetProjectId": "dev-com-334508",
   "location": "asia-northeast3"
 }
 ```
 
-The Terraform PoC creates a BigQuery dataset named `ds_task_001` in the requested target project.
+Expected resources:
+
+```text
+ds_task_005
+analysis-autopilot-a
+  └─ namespace task-005
+      └─ ResourceQuota task-quota
+```
+
+## Reset before a fresh test
+
+To remove the PoC workload resources while preserving the bastion VM and the resources required to reach/rebuild the environment:
+
+```bash
+export CONFIRM_DELETE=YES
+bash scripts/reset_poc_workloads.sh
+```
+
+The reset deletes:
+
+- Infrastructure Manager deployments named `task-*` and their managed resources
+- GKE cluster `analysis-autopilot-a` from the old/manual PoC
+- leftover BigQuery datasets named `ds_task_*`
+
+The reset preserves:
+
+- bastion VM
+- `managed02-dev-vpc`
+- `managed02-dev-subnet`
+- Cloud Run adapter
+- Infrastructure Manager/Cloud Run service accounts and IAM bootstrap
+- Artifact Registry
+- enabled APIs
+
+This preservation is intentional: deleting the VPC/subnet would break the VM, and deleting the Cloud Run/IAM control plane would prevent the existing portal workflow from creating new task deployments.
 
 ## IAM summary
 
 Cloud Run runtime service account:
 - `roles/config.admin` on the Infrastructure Manager project
-- `roles/iam.serviceAccountUser` on the Infra Manager execution service account
+- `roles/iam.serviceAccountUser` on the Infrastructure Manager execution service account
 
-Infrastructure Manager execution service account:
-- `roles/config.agent` on the Infrastructure Manager project
-- `roles/bigquery.admin` on the target project for this PoC
+Infrastructure Manager execution service account for task deployments:
+- `roles/config.agent`
+- `roles/bigquery.admin` for this PoC
+- `roles/container.admin` for Kubernetes/GKE API access
+- `roles/compute.viewer` for GKE backing resource discovery
 
 For production, replace broad PoC permissions with custom/minimum roles.
 
-## Notes
+## Important design point
 
-- `config.googleapis.com` is the Infrastructure Manager API endpoint.
-- Infrastructure Manager reads `infra-manager/terraform/task-blueprint` from this repository.
-- Because this repository is public, the PoC can use Infra Manager `gitSource` directly. For a private repository, connect the Git provider as required by Infrastructure Manager/Cloud Build.
-- The VM installation cannot be performed remotely by this repository; `portal-java/deploy/install_vm.sh` is provided to run on `192.168.142.101`.
+The Java portal does **not** call individual Google Cloud resource APIs. It calls the Cloud Run adapter. The adapter calls Infrastructure Manager, and Infrastructure Manager executes the task Terraform blueprint. GKE foundation creation is now also represented as Terraform code, but remains a separate one-time lifecycle from per-task provisioning.
